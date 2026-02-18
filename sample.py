@@ -1,8 +1,8 @@
 import pandas as pd
 
 # Paths
-CSV_PATH = "notebooks/csv/github_agent_repos_python_final.csv"
-SAMPLE_CSV = "notebooks/csv/sample_for_llm.csv"
+CSV_PATH = "notebooks/csv/github_agent_repos_python_20251225.csv"
+SAMPLE_CSV = "notebooks/csv/sample_for_llm_1.csv"
 SAMPLE_SIZE = 200
 
 # Load the full CSV

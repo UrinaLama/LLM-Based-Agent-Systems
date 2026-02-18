@@ -1,27 +1,23 @@
 import json
 import os
+import re
 from tqdm import tqdm
+import csv
 
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+# CONFIG
+SAMPLE_CSV_PATH = "notebooks/csv/sample_for_llm_shortReadme.csv"
+OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_2_HPC.csv"
+FEW_SHOT_JSON = "notebooks/data/few_shot_examples_shortReadme.json"
 
-SAMPLE_CSV_PATH = "notebooks/csv/sample_for_llm.csv"
-OUTPUT_JSON = "notebooks/data/sample_agent_repos_llm_filtered.json"
-FEW_SHOT_JSON = "notebooks/data/few_shot_examples.json"
+MODEL =  "Qwen/Qwen3-8B"   #"Qwen/Qwen3-4B"                 
+CACHE_DIR = os.path.expanduser("~/hf_cache")
+MAX_NEW_TOKENS = 100  # short enough for JSON output
 
-# MODEL CONFIG
-MODEL = "Qwen/Qwen3-8B"
-MAX_CONTEXT_TOKENS = 32768
-MAX_NEW_TOKENS = 100
-
-FEWSHOT_README_TOKENS = 3000      # per example
-TARGET_README_TOKENS = 3500       # for the repo being classified
-SAFE_CONTEXT_LIMIT = 32000      # hard guard
-
-CACHE_DIR=os.path.expanduser("~/hf_cache")
-
+# Device
 if torch.cuda.is_available():
     device_map = "auto"
     torch_dtype = torch.float16
@@ -32,7 +28,7 @@ else:
     device_map = {"": "cpu"}
     torch_dtype = torch.float32
 
-# CATEGORIES
+# Categories
 CATEGORIES = [
     "collection of llm agent projects",
     "collection of datasets",
@@ -43,11 +39,11 @@ CATEGORIES = [
     "documents about llm agents",
     "other"
 ]
-
 category_list = "\n".join(f"- {c}" for c in CATEGORIES)
 
-
+# -------------------------------
 # LOAD MODEL
+# -------------------------------
 print("Loading tokenizer and model...")
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -67,38 +63,19 @@ model = AutoModelForCausalLM.from_pretrained(
 model.eval()
 print("Model loaded successfully.")
 
-# TOKEN
-
-def truncate_to_tokens(text, max_tokens, tokenizer):
-    if not text:
-        return ""
-
-    tokens = tokenizer.encode(text, add_special_tokens=False)
-
-    if len(tokens) <= max_tokens:
-        return text
-
-    tokens = tokens[:max_tokens]
-    return tokenizer.decode(tokens, skip_special_tokens=True)
-
-
+# -------------------------------
 # FEW-SHOT EXAMPLES
-def build_few_shot(path, tokenizer, max_readme_tokens):
+# -------------------------------
+def build_few_shot(path):
     with open(path, "r") as f:
         examples = json.load(f)
 
-    blocks = []
+    messages = []
 
     for i, ex in enumerate(examples, 1):
         readme = ex.get("readme_content", "") or ""
 
-        readme = truncate_to_tokens(
-            readme,
-            max_tokens=max_readme_tokens,
-            tokenizer=tokenizer
-        )
-
-        blocks.append(f"""
+        example_text = f"""
 ### Example {i}
 Input:
 name: "{ex['full_name']}"
@@ -110,38 +87,27 @@ readme:
 \"\"\"
 
 Output:
-{{"category":"{ex['category']}"}}
-""")
+{{"category":"{ex['category']}"}}"""
 
-    return "\n".join(blocks)
+        messages.append({"role": "user", "content": example_text})
 
+    return messages
 
-FEW_SHOT = build_few_shot(
-    FEW_SHOT_JSON,
-    tokenizer=tokenizer,
-    max_readme_tokens=FEWSHOT_README_TOKENS
-)
+FEW_SHOT_MESSAGES = build_few_shot(FEW_SHOT_JSON)
 
-
-# PROMPT BUILDER
-def build_prompt(row):
-    name = row.get("name", "")
+# -------------------------------
+# CLASSIFICATION
+# -------------------------------
+def classify_row(row, retries=2):
+    name = row.get("full_name", "")
     desc = row.get("description", "")
     topics = row.get("topics", "")
     readme = row.get("readme_snippet", "")
 
-    readme = truncate_to_tokens(
-        readme,
-        max_tokens=TARGET_README_TOKENS,
-        tokenizer=tokenizer
-    )
-
-    return f"""
+    main_prompt = f"""
 You are an expert classifier of GitHub repositories related to LLMs and AI agents.
-
-Your task:
-Assign EXACTLY ONE high-level category that best describes the repository.
-
+IMPORTANT: Assign EXACTLY ONE high-level category that best describes the repository in a single JSON object in this exact format:
+{{"category": "<category-name>"}}
 Preferred categories:
 {category_list}
 
@@ -154,8 +120,7 @@ Rules:
     - lowercase
     - noun phrase
 • Avoid creating unnecessary new categories
-• Do NOT explain your answer 
-• Output ONLY valid JSON
+• Do NOT write any explanations, reasoning, or extra text.
 • If uncertain between two categories, choose the more concrete one
 
 Classification guidance:
@@ -165,11 +130,8 @@ Classification guidance:
     - name
     - description
     - topics
-    - README content
+    - readme 
 • Prioritize repository purpose over implementation details
-
-### Examples:
-{FEW_SHOT}
 
 ### Now classify this repository:
 name: "{name}"
@@ -184,86 +146,88 @@ Output format:
 {{"category": "<category-name>"}}
 """
 
-
-# CLASSIFICATION
-def classify_row(row, retries=2):
-    prompt = build_prompt(row)
-
+    # Combine few-shot examples + current repo
+    messages = FEW_SHOT_MESSAGES + [{"role": "user", "content": main_prompt}]
+    
+    """
+    print ("Constructed messages for LLM:")
+    for msg in messages:
+        print(f"msg: {msg['role']} - {msg['content']}...")
+    """
+    
     try:
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            add_special_tokens=False
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False  # disables reasoning block
         )
 
-        # ---- HARD SAFE GUARD ----
-        if inputs["input_ids"].shape[1] > SAFE_CONTEXT_LIMIT:
-            prompt = truncate_to_tokens(
-                prompt,
-                SAFE_CONTEXT_LIMIT,
-                tokenizer
-            )
-            inputs = tokenizer(
-                prompt,
-                return_tensors="pt",
-                add_special_tokens=False
-            )
-
-        inputs = inputs.to(model.device)
+        inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
-                temperature=0.0,
-                do_sample=False
+                do_sample=False,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.eos_token_id
             )
 
-        decoded = tokenizer.decode(
-            outputs[0],
-            skip_special_tokens=True
-        )
+        generated_tokens = outputs[0][inputs["input_ids"].shape[1]:]
+        decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
-    except Exception:
+        #print("Decoded LLM output:", decoded)
+
+    except Exception as e:
+        print("Generation error:", e)
         if retries > 0:
             return classify_row(row, retries - 1)
         return "other"
 
+    # Parse JSON safely
     try:
-        start = decoded.find("{")
-        end = decoded.rfind("}")
-        parsed = json.loads(decoded[start:end + 1])
+        match = re.search(r"\{.*\}", decoded, re.DOTALL)
+        if not match:
+            print("No JSON found in LLM output.")
+            return "other"
 
+        parsed = json.loads(match.group())
         cat = parsed.get("category", "").strip().lower()
 
-        if cat in CATEGORIES:
+        if not cat:
+            return "other"
+
+        if cat in CATEGORIES or cat.startswith("new:"):
             return cat
 
-        return cat if cat else "other"
+        return cat
 
-    except Exception:
+    except Exception as e:
+        print("Error parsing JSON:", e)
         return "other"
 
 
-# MAIN
 if __name__ == "__main__":
     df = pd.read_csv(SAMPLE_CSV_PATH)
-
     print(f"Classifying {len(df)} repositories...")
 
-    os.makedirs(os.path.dirname(OUTPUT_JSON), exist_ok=True)
+    os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
 
-    # Open file in append mode
-    with open(OUTPUT_JSON, "a") as f:
+    # Prepare CSV writing
+    fieldnames = list(df.columns) + ["category"]
+
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()  # write header once
+
         for _, row in tqdm(df.iterrows(), total=len(df)):
             row_dict = row.to_dict()
 
             category = classify_row(row_dict)
             row_dict["category"] = category
 
-            # Write immediately (JSON Lines format)
-            f.write(json.dumps(row_dict) + "\n")
-            f.flush()   # VERY important on HPC
+            writer.writerow(row_dict)
+            csvfile.flush()   # VERY important for long runs / HPC safety
 
-    print("Saved streamed output to:", OUTPUT_JSON)
-
+    print("Saved streamed results to:", OUTPUT_CSV)
