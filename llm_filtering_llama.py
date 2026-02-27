@@ -7,15 +7,24 @@ import csv
 import pandas as pd
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from huggingface_hub import login
 
 # CONFIG
 SAMPLE_CSV_PATH = "notebooks/csv/sample_for_llm_shortReadme.csv"
-OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_2.csv"
+OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_llama.csv"
 FEW_SHOT_JSON = "notebooks/data/few_shot_examples_shortReadme.json"
 
-MODEL = "Qwen/Qwen3-4B"        #"Qwen/Qwen3-8B"           
+MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct"       #"meta-llama/Llama-3.2-3B-Instruct"        
 CACHE_DIR = os.path.expanduser("~/hf_cache")
 MAX_NEW_TOKENS = 100  # short enough for JSON output
+
+# Hugging Face token
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN environment variable not set!")
+
+login(token=HF_TOKEN)
 
 # Device
 if torch.cuda.is_available():
@@ -41,31 +50,32 @@ CATEGORIES = [
 ]
 category_list = "\n".join(f"- {c}" for c in CATEGORIES)
 
-# -------------------------------
 # LOAD MODEL
-# -------------------------------
 print("Loading tokenizer and model...")
 
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL,
     cache_dir=CACHE_DIR,
-    trust_remote_code=True
+    token=HF_TOKEN,
+    use_fast=True
 )
 
 model = AutoModelForCausalLM.from_pretrained(
     MODEL,
     cache_dir=CACHE_DIR,
+    token=HF_TOKEN,
     device_map=device_map,
     torch_dtype=torch_dtype,
-    trust_remote_code=True
 )
+
+# Important for LLaMA
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
 model.eval()
 print("Model loaded successfully.")
 
-# -------------------------------
 # FEW-SHOT EXAMPLES
-# -------------------------------
 def build_few_shot(path):
     with open(path, "r") as f:
         examples = json.load(f)
@@ -95,9 +105,7 @@ Output:
 
 FEW_SHOT_MESSAGES = build_few_shot(FEW_SHOT_JSON)
 
-# -------------------------------
 # CLASSIFICATION
-# -------------------------------
 def classify_row(row, retries=2):
     name = row.get("full_name", "")
     desc = row.get("description", "")
@@ -159,8 +167,7 @@ Output format:
         text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False  # disables reasoning block
+            add_generation_prompt=True
         )
 
         inputs = tokenizer([text], return_tensors="pt").to(model.device)
@@ -171,7 +178,7 @@ Output format:
                 max_new_tokens=MAX_NEW_TOKENS,
                 do_sample=False,
                 eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.pad_token_id
             )
 
         generated_tokens = outputs[0][inputs["input_ids"].shape[1]:]
@@ -187,7 +194,7 @@ Output format:
 
     # Parse JSON safely
     try:
-        match = re.search(r"\{.*\}", decoded, re.DOTALL)
+        match = re.search(r"\{.*?\}", decoded, re.DOTALL)
         if not match:
             print("No JSON found in LLM output.")
             return "other"
@@ -208,6 +215,7 @@ Output format:
         return "other"
 
 
+#Main
 if __name__ == "__main__":
     df = pd.read_csv(SAMPLE_CSV_PATH)
     print(f"Classifying {len(df)} repositories...")

@@ -10,10 +10,10 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # CONFIG
 SAMPLE_CSV_PATH = "notebooks/csv/sample_for_llm_shortReadme.csv"
-OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_2_HPC.csv"
+OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_Qwen.csv"
 FEW_SHOT_JSON = "notebooks/data/few_shot_examples_shortReadme.json"
 
-MODEL =  "Qwen/Qwen3-8B"   #"Qwen/Qwen3-4B"                 
+MODEL =  "Qwen/Qwen3-14B" #"Qwen/Qwen3-30B-A3B-Thinking-2507" #"Qwen/Qwen3-8B"   #"Qwen/Qwen3-4B"                 
 CACHE_DIR = os.path.expanduser("~/hf_cache")
 MAX_NEW_TOKENS = 100  # short enough for JSON output
 
@@ -59,6 +59,9 @@ model = AutoModelForCausalLM.from_pretrained(
     torch_dtype=torch_dtype,
     trust_remote_code=True
 )
+
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 
 model.eval()
 print("Model loaded successfully.")
@@ -170,8 +173,9 @@ Output format:
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
                 do_sample=False,
+                temperature=0.0,
                 eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.pad_token_id
             )
 
         generated_tokens = outputs[0][inputs["input_ids"].shape[1]:]
