@@ -9,11 +9,11 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # CONFIG
-SAMPLE_CSV_PATH = "notebooks/csv/sample_for_llm_shortReadme.csv"
-OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_Qwen.csv"
-FEW_SHOT_JSON = "notebooks/data/few_shot_examples_shortReadme.json"
+SAMPLE_CSV_PATH = "notebooks/csv/clean_sample_for_llm_shortReadme.csv"
+OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_Qwen_2026317.csv"
+FEW_SHOT_JSON = "notebooks/data/few_shot_examples_shortReadme_binaryClass.json"
 
-MODEL =  "Qwen/Qwen3-14B" #"Qwen/Qwen3-30B-A3B-Thinking-2507" #"Qwen/Qwen3-8B"   #"Qwen/Qwen3-4B"                 
+MODEL =  "Qwen/Qwen3-4B" #"Qwen/Qwen3-14B" #"Qwen/Qwen3-30B-A3B-Thinking-2507" #"Qwen/Qwen3-8B"   #"Qwen/Qwen3-4B"                 
 CACHE_DIR = os.path.expanduser("~/hf_cache")
 MAX_NEW_TOKENS = 100  # short enough for JSON output
 
@@ -28,22 +28,12 @@ else:
     device_map = {"": "cpu"}
     torch_dtype = torch.float32
 
-# Categories
 CATEGORIES = [
-    "collection of llm agent projects",
-    "collection of datasets",
-    "agentic framework",
-    "agentic benchmark",
-    "foundation model",
     "llm-based agentic system",
-    "documents about llm agents",
     "other"
 ]
-category_list = "\n".join(f"- {c}" for c in CATEGORIES)
 
-# -------------------------------
 # LOAD MODEL
-# -------------------------------
 print("Loading tokenizer and model...")
 
 tokenizer = AutoTokenizer.from_pretrained(
@@ -76,7 +66,7 @@ def build_few_shot(path):
     messages = []
 
     for i, ex in enumerate(examples, 1):
-        readme = ex.get("readme_content", "") or ""
+        readme = ex.get("readme_snippet", "") or ""
 
         example_text = f"""
 ### Example {i}
@@ -108,33 +98,19 @@ def classify_row(row, retries=2):
     readme = row.get("readme_snippet", "")
 
     main_prompt = f"""
-You are an expert classifier of GitHub repositories related to LLMs and AI agents.
-IMPORTANT: Assign EXACTLY ONE high-level category that best describes the repository in a single JSON object in this exact format:
-{{"category": "<category-name>"}}
-Preferred categories:
-{category_list}
+You are an expert classifier of GitHub repositories related to LLM-based AI agents.
+IMPORTANT: Your task is to classify the repository into ONE of the following categories:
+1. llm-based agentic system
+2. other
 
-Rules:
-• The list above is a GUIDELINE, not a hard limit  
-• Prefer using an existing category unless it is clearly incorrect 
-• ALL new categories MUST start with the prefix "new:"
-• New categories must be:
-    - 1–5 words
-    - lowercase
-    - noun phrase
-• Avoid creating unnecessary new categories
+Instructions: 
+• Analyze the repository using **description** and **topics**. Only use the README if the description is unclear.
+• Choose ONLY ONE category.
+• Do NOT create new categories.
 • Do NOT write any explanations, reasoning, or extra text.
-• If uncertain between two categories, choose the more concrete one
 
-Classification guidance:
-• If the repository is a curated list, awesome list, or resource list → it is a collection  
-• Choose the MOST SPECIFIC collection category if possible   
-• Use ALL available information:
-    - name
-    - description
-    - topics
-    - readme 
-• Prioritize repository purpose over implementation details
+Return only valid single JSON object in this format:
+{{"category": "<category-name>"}}
 
 ### Now classify this repository:
 name: "{name}"
@@ -199,13 +175,10 @@ Output format:
         parsed = json.loads(match.group())
         cat = parsed.get("category", "").strip().lower()
 
-        if not cat:
-            return "other"
-
-        if cat in CATEGORIES or cat.startswith("new:"):
+        if cat in CATEGORIES:
             return cat
 
-        return cat
+        return "other"
 
     except Exception as e:
         print("Error parsing JSON:", e)
